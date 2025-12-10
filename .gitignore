@@ -22,6 +22,7 @@ wheels/
 *.csv
 runs/
 data/
+logs/
 # Virtual environments
 venv/
 ENV/

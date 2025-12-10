@@ -254,6 +254,6 @@ if __name__ == "__main__":
         elif experiment == "tolerance":
             df_tol = run_tolerance_sweep_and_plot(spread_radius=SPREAD_RADIUS, n_trials_jax=N_TRIALS_JAX, n_trials_torch=N_TRIALS_TORCH, n_trials_scipy=N_TRIALS_SCIPY, tol_scales=[0.1, 0.3, 1.0, 3.0, 10.0])
         elif experiment == "jax_grid":
-            df_jax = run_jax_spread_trials_grid(spread_radii=[1e-3, 0.1, 1.0, 10.0, 50.0, 100.0], jax_trials_list=[5, 10, 20, 50, 100, 200, 500, 1000])
+            df_jax = run_jax_spread_trials_grid(spread_radii=[1e-3,5, 100.0], jax_trials_list=[5, 100,  1000])
         elif experiment == "all":
             run_all_experiments_automated()
