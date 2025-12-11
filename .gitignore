@@ -23,6 +23,7 @@ wheels/
 runs/
 data/
 logs/
+run.py
 # Virtual environments
 venv/
 ENV/

@@ -4,15 +4,15 @@ import numpy as np
 import jax  #type: ignore
 import jax.numpy as jnp  #type: ignore
 from jax import jit, vmap, grad  #type: ignore
-from sqp.solvers.jax_sqp import solve_sqp_fixed_iter
-def objective_jax(x): #sample objective function
+from sqp.solvers.jax_sqp import solve_sqp_diff 
+def objective_jax(x, theta): #sample objective function 
     return x[0]+x[1]
 def constraints_jax(x,theta): #sample constraint function
     return jnp.array([ x[0]**2 + x[1]**2 - theta ])
 def single_problem_solver_jax(x0,theta):#solve one problem instance
-    ineq_indices = jnp.array([0], dtype=jnp.int32)
-    x_final, lam_final, _ = solve_sqp_fixed_iter( x0,f=objective_jax,c=lambda x: constraints_jax(x,theta),ineq_indices=ineq_indices,max_iter=50,tol=1e-6)
-    return x_final, lam_final #return final solution
+    ineq_indices = (0,) #non diff argument,so ensure jax doesnt trace it
+    x_final = solve_sqp_diff(x0, theta, objective_jax, constraints_jax, ineq_indices, max_iter=50, tol=1e-6)
+    return x_final, None 
 batch_solver_jax = vmap(single_problem_solver_jax, in_axes=(0, None)) #parallelize over x0, broadcast theta
 jit_batch_solver_jax = jit(batch_solver_jax) #JIT-compile
 def run_batch_diff_demo():
@@ -30,7 +30,7 @@ def run_batch_diff_demo():
     theta_test = 2.0
     def loss_fn(theta):
         x_final, _ = single_problem_solver_jax(test_x0, theta) #solve single problem
-        return objective_jax(x_final)  #objective value at final solution
+        return objective_jax(x_final, theta)  #objective value at final solution,pass theta also
     grad_loss = jax.jit(jax.grad(loss_fn)) #JIT-compile
     gradient = grad_loss(theta_test) #compute gradient
     fd= loss_fn(theta_test + 1e-6) - loss_fn(theta_test - 1e-6)

@@ -97,7 +97,7 @@ def solve_sqp_fixed_iter(x0,f, c, ineq_indices,max_iter=100,tol=1e-6, eta=0.25, 
     m = c_init.size #number of constraints
     if m == 0: #if no constraints, use unconstrained BFGS
         x_final, _, converged = unconstrained_bfgs(x, f, max_iter, tol)
-        return x_final, jnp.zeros(0), converged
+        return x_final, jnp.zeros(0), jnp.eye(n), converged #modified to support differentiation acc to OptNet
     ineq_indices_arr = jnp.array(ineq_indices, dtype=jnp.int32) #inequality constraint indices
     all_indices = jnp.arange(m)#all constraint indices
     mask_ineq = jnp.isin(all_indices, ineq_indices_arr).astype(jnp.float64) #mask for inequalities
@@ -194,12 +194,69 @@ def solve_sqp_fixed_iter(x0,f, c, ineq_indices,max_iter=100,tol=1e-6, eta=0.25, 
         U_new = lax.cond( jnp.logical_and(s_y > 1e-8, s_norm2 > 1e-8),do_bfgs, keep_U_scaled,operand=None)
         return (x_new, lam_new, U_new, mu, first_bfgs_new),None
         #i dont remember why we do above functions this way,remind me
-    (x_final, lam_final, _, _, _), _ = lax.scan( sqp_step,  (x, lam, U, mu, first_bfgs), None,length=max_iter )
-    return x_final, lam_final, False
-def solve_sqp(x0,f,c,ineq_indices=None, max_iter=100, tol=1e-6, eta=0.25, tau=0.5, rho=0.5, mu0=10.0 ,cache_key=None) :
+    (x_final, lam_final, U_final, _, _), _ = lax.scan( sqp_step,  (x, lam, U, mu, first_bfgs), None,length=max_iter )
+    return x_final, lam_final, U_final, False #modified to return U_final to support differentiation
+def solve_sqp(x0,f,c,ineq_indices=None, max_iter=100, tol=1e-6, eta=0.25, tau=0.5, rho=0.5, mu0=10.0 ,cache_key=None) : #just a wrapper to match signature
     if ineq_indices is None:
         ineq_indices = jnp.array([], dtype=jnp.int32)
     else:
         ineq_indices = jnp.array(ineq_indices, dtype=jnp.int32)
-    x_final, lam_final, converged = solve_sqp_fixed_iter(x0, f, c, ineq_indices, max_iter, tol, eta, tau, rho, mu0)
+    x_final, lam_final, _, converged = solve_sqp_fixed_iter(x0, f, c, ineq_indices, max_iter, tol, eta, tau, rho, mu0)
     return x_final, lam_final, max_iter, converged
+def kkt_stationarity(params, x, lam, f_fn, c_fn, active_mask):
+    c_val = jnp.atleast_1d(c_fn(x, params)) #evaluate constraints
+    g = jax.grad(lambda _x, _p: f_fn(_x, _p))(x, params) #we want grad w.r.t. x only
+    J = jax.jacfwd(lambda _x, _p: jnp.atleast_1d(c_fn(_x, _p)))(x, params) #we want jacobian w.r.t. x only
+    if J.ndim == 1: J = J.reshape(1, -1) #ensure 2D
+    stationarity = g + J.T @ lam #gradient of lagrangian
+    feasibility = c_val * active_mask #inactive constraints have zero residual
+    return stationarity, feasibility #return stuff
+def solve_sqp_diff(x0, params, f_fn, c_fn, ineq_indices, max_iter=100, tol=1e-6, eta=0.25, tau=0.5, rho=0.5): 
+    def fwd(x0, params):
+        f_inner = lambda x: f_fn(x, params) #objective with params fixed
+        c_inner = lambda x: c_fn(x, params) #constraints with params fixed
+        x_star, lam_star, U_star, _ = solve_sqp_fixed_iter(
+            x0, f_inner, c_inner, ineq_indices, max_iter, tol, eta, tau, rho
+        ) #solve SQP
+        c_val = jnp.atleast_1d(c_inner(x_star)) #evaluate constraints at solution
+        m = c_val.shape[0] #number of constraints
+        if ineq_indices is None: ineq_indices_arr = jnp.array([], dtype=jnp.int32) #all equalities
+        else: ineq_indices_arr = jnp.array(ineq_indices, dtype=jnp.int32) #inequality indices
+        all_indices = jnp.arange(m) #all constraint indices
+        mask_ineq = jnp.isin(all_indices, ineq_indices_arr).astype(jnp.float64) #mask for inequality constraints
+        mask_eq = 1.0 - mask_ineq #mask for equality constraints
+        violation_mask = (c_val > -1e-5).astype(jnp.float64) #which constraints are violated
+        multiplier_mask = (lam_star > 1e-5).astype(jnp.float64) #which constraints have positive multipliers(active)
+        active_mask = mask_eq + mask_ineq * jnp.maximum(violation_mask, multiplier_mask) #all equalities active,inequalities active if violated or positive multiplier
+        active_mask = jnp.minimum(active_mask, 1.0) #safeguard
+        residuals = (x_star, lam_star, U_star, active_mask, params) 
+        return x_star, residuals 
+
+    def bwd(residuals, g_in):
+        x_star, lam_star, U_star, active_mask, params = residuals 
+        n = x_star.shape[0] #number of variables
+        m = lam_star.shape[0] #number of constraints
+        P = U_star.T @ U_star + 1e-8 * jnp.eye(n) #regularized Hessian
+        J = jax.jacfwd(lambda _x: jnp.atleast_1d(c_fn(_x, params)))(x_star) 
+        if J.ndim == 1: J = J.reshape(1, -1) #ensure 2D
+        A_masked = J * active_mask[:, None] #all inactive constraints have zero rows
+        reg_diag = 1.0 - active_mask #regularization for inactive constraints
+        KKT = jnp.block([
+            [P,                     A_masked.T],
+            [A_masked,              jnp.diag(reg_diag)]
+        ])
+        KKT = KKT + 1e-8 * jnp.eye(n + m) #regularize KKT matrix to ensure non-singularity
+        rhs = jnp.concatenate([-g_in, jnp.zeros(m)]) #RHS vector
+        v = jnp.linalg.solve(KKT, rhs) #how much does solution change given perturbation in equations
+        def stationarity_wrt_params(p):
+            stat, feas = kkt_stationarity(p, x_star, lam_star, f_fn, c_fn, active_mask)
+            return jnp.concatenate([stat, feas])
+        _, vjp_fun = jax.vjp(stationarity_wrt_params, params) #this is delF/deltheta
+        grad_params = vjp_fun(v)[0]     #this is first row of v*delF/deltheta
+        grad_x0 = jnp.zeros_like(x_star) #this is zero ,usually in convex problems starting point doesnt affect final solution
+        return grad_x0, grad_params #we finally return gradients w.r.t. x0 and params
+    @jax.custom_vjp#purpose is to define custom forward and backward passes for differentiation
+    def _solve_p(x0, params): #forward pass
+        return fwd(x0, params)[0]
+    _solve_p.defvjp(fwd, bwd)#tells JAX to use fwd and bwd for forward and backward passes, and not unroll the whole computation graph
+    return _solve_p(x0, params)#return solution
