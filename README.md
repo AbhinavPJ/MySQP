@@ -44,6 +44,7 @@ Features:
 - Custom KKT solver for active set management
 - Merit function with penalty parameter for line search
 - Automatic differentiation for gradients and Jacobians
+- Differentiable without unrolling(Implemented the ideas presented in "OptNet: Differentiable Optimization as a Layer in Neural Networks" by Amos and Kolter,2017)
 
 ### PyTorch SQP Solver
 ```python
@@ -160,7 +161,8 @@ python experiments/differentiability/batch_diff_demo.py
 
 Demonstrates:
 - Batched solving of 1000+ problems in parallel with JAX
-- Solver is differentiable (constraints can be parameterized and differentiated through)
+- Implicit differentiation through the solver using custom VJP
+- Efficient gradient computation (no unrolling)
 - Gradient computation with respect to problem parameters
 - Comparison with finite difference approximations
 
