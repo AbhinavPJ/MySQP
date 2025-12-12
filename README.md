@@ -154,17 +154,17 @@ Pure NumPy implementation using numerical finite differences for derivatives.
 
 ### Differentiability Experiments
 
+#### Test Suite
+```bash
+python experiments/differentiability/test_diff_simple.py
+```
+Validates implicit differentiation through SQP solver using custom VJP against finite differences for scalar/vector parameters and various constraint types.
+
 #### Batch Differentiation Demo
 ```bash
 python experiments/differentiability/batch_diff_demo.py
 ```
-
-Demonstrates:
-- Batched solving of 1000+ problems in parallel with JAX
-- Implicit differentiation through the solver using custom VJP
-- Efficient gradient computation (no unrolling)
-- Gradient computation with respect to problem parameters
-- Comparison with finite difference approximations
+Demonstrates batched solving of 1000+ problems in parallel with JAX and efficient gradient computation without unrolling.
 
 ### Robustness Experiments
 
@@ -194,3 +194,9 @@ python experiments/robustness/run.py tolerance    # Tolerance sweep only
 python experiments/robustness/run.py jax_grid     # JAX scaling analysis
 python experiments/robustness/run.py all          # All experiments
 ```
+
+#### Optimization Trajectory Visualization
+```bash
+python experiments/robustness/visualize_optimization.py
+```
+Generates convergence plots and contour trajectory visualizations for all 2D benchmark problems showing optimization paths, constraint boundaries, and iteration-by-iteration progress.
