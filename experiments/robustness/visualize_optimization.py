@@ -12,6 +12,43 @@ from sqp.benchmarks import PROBLEM_REGISTRY
 jax.config.update("jax_enable_x64", True)
 OUTPUT_DIR = "experiments/robustness/optimization_plots"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+def create_bounds_constraints(bounds, original_c=None, original_ineq_indices=None):
+    n_vars = len(bounds)
+    bound_constraints = []
+    for i, (lb, ub) in enumerate(bounds):
+        if lb > -1e19:
+            bound_constraints.append(('lower', i, lb))
+        if ub < 1e19:
+            bound_constraints.append(('upper', i, ub))
+    n_bound_constraints = len(bound_constraints)
+    if original_c is not None:
+        test_x = jnp.zeros(n_vars)
+        c_test = jnp.atleast_1d(original_c(test_x))
+        n_original_constraints = c_test.shape[0]
+    else:
+        n_original_constraints = 0
+    def combined_c(x):
+        constraints = []
+        if original_c is not None:
+            c_orig = jnp.atleast_1d(original_c(x))
+            constraints.append(c_orig)
+        for bound_type, idx, value in bound_constraints:
+            if bound_type == 'lower':
+                constraints.append(jnp.array([value - x[idx]]))
+            else:
+                constraints.append(jnp.array([x[idx] - value]))
+        if constraints:
+            return jnp.concatenate(constraints)
+        else:
+            return jnp.zeros((0,), dtype=x.dtype)
+    if original_ineq_indices is not None:
+        combined_ineq_indices = list(original_ineq_indices)
+    else:
+        combined_ineq_indices = []
+    base_idx = n_original_constraints
+    for i in range(n_bound_constraints):
+        combined_ineq_indices.append(base_idx + i)
+    return combined_c, combined_ineq_indices
 def solve_sqp_with_history(x0, f, c, ineq_indices, max_iter=100, tol=1e-6, eta=0.25, tau=0.5, rho=0.5, mu0=10.0):
     x = jnp.array(x0, dtype=jnp.float64)
     n = x.size
@@ -137,44 +174,60 @@ def solve_unconstrained_with_history(x0, f, max_iter, tol):
         if jnp.linalg.norm(g_new) < tol:
             break
     return x, jnp.zeros(0), x_history, f_history
-def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_optimal=None, xlim=None, ylim=None, title="Optimization Path"):
-    if c is None:
-        x_final, _, x_history, f_history = solve_unconstrained_with_history(jnp.array(x0), f, max_iter, 1e-6)
-    else:
-        if ineq_indices is None:
-            ineq_indices = []
-        x_final, _, x_history, f_history = solve_sqp_with_history(x0, f, c, ineq_indices, max_iter=max_iter)
-    x_history = np.array(x_history)
-    f_history = np.array(f_history)
+def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_optimal=None, xlim=None, ylim=None, title="Optimization Path", spread_radius=5.0, num_trials=10):
+    all_x_histories = []
+    all_f_histories = []
+    np.random.seed(42)
+    for trial in range(num_trials):
+        if trial == 0:
+            x0_trial = x0
+        else:
+            perturbation = np.random.randn(len(x0)) * spread_radius
+            x0_trial = jnp.array(x0) + jnp.array(perturbation)
+        if c is None:
+            x_final, _, x_history, f_history = solve_unconstrained_with_history(jnp.array(x0_trial), f, max_iter, 1e-6)
+        else:
+            if ineq_indices is None:
+                ineq_indices = []
+            x_final, _, x_history, f_history = solve_sqp_with_history(x0_trial, f, c, ineq_indices, max_iter=max_iter)
+        all_x_histories.append(np.array(x_history))
+        all_f_histories.append(np.array(f_history))
+    x_history = all_x_histories[0]
+    f_history = all_f_histories[0]
     if f_optimal is None:
         f_optimal = f_history[-1]
-    suboptimality = np.abs(f_history - f_optimal)
-    suboptimality = np.maximum(suboptimality, 1e-16)
     if x_history.shape[1] == 2:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     else:
         fig, ax1 = plt.subplots(1, 1, figsize=(8, 5))
-    ax1.semilogy(range(len(suboptimality)), suboptimality, 'o-', linewidth=2, markersize=5, color='steelblue')
+    colors = plt.cm.tab10(np.linspace(0, 1, num_trials))
+    for trial_idx, f_hist_trial in enumerate(all_f_histories):
+        subopt_trial = np.abs(f_hist_trial - f_optimal)
+        subopt_trial = np.maximum(subopt_trial, 1e-16)
+        is_nominal = (trial_idx == 0)
+        alpha_val = 0.9 if is_nominal else 0.4
+        linewidth = 2.5 if is_nominal else 1.5
+        label = 'Nominal' if is_nominal else None
+        ax1.semilogy(range(len(subopt_trial)), subopt_trial, 'o-', linewidth=linewidth, markersize=4 if is_nominal else 3, color=colors[trial_idx], alpha=alpha_val, label=label)
     ax1.set_xlabel('Iteration', fontsize=12)
     ax1.set_ylabel('Suboptimality |f(x) - f*|', fontsize=12)
     ax1.set_title(f'{title}: Convergence', fontsize=13, fontweight='bold')
     ax1.grid(True, alpha=0.3)
-    ax1.axhline(y=1e-6, color='r', linestyle='--', alpha=0.5, label='Tolerance')
-    textstr = f'Reference f*: {f_optimal:.6e}\nObtained f: {f_history[-1]:.6e}\nIterations: {len(f_history)-1}'
+    ax1.axhline(y=1e-6, color='r', linestyle='--', alpha=0.5, linewidth=2, label='Tolerance')
+    successful_trials = sum(1 for f_hist in all_f_histories if abs(f_hist[-1] - f_optimal) < 1e-3)
+    textstr = f'Reference f*: {f_optimal:.6e}\nObtained f: {f_history[-1]:.6e}\nIterations: {len(f_history)-1}\nTrials: {num_trials} ({successful_trials} successful)\nSpread radius: {spread_radius}'
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-    ax1.text(0.05, 0.95, textstr, transform=ax1.transAxes, fontsize=10, verticalalignment='top', bbox=props)
+    ax1.text(0.98, 0.98, textstr, transform=ax1.transAxes, fontsize=10, verticalalignment='top', horizontalalignment='right', bbox=props)
     ax1.legend()
     if x_history.shape[1] == 2:
-        if xlim is None:
-            x_min, x_max = x_history[:, 0].min(), x_history[:, 0].max()
-            x_range = x_max - x_min
-            x_range = max(x_range, 0.1)
-            xlim = [x_min - 0.5 * x_range, x_max + 0.5 * x_range]
-        if ylim is None:
-            y_min, y_max = x_history[:, 1].min(), x_history[:, 1].max()
-            y_range = y_max - y_min
-            y_range = max(y_range, 0.1)
-            ylim = [y_min - 0.5 * y_range, y_max + 0.5 * y_range]
+        all_x = np.concatenate([h[:, 0] for h in all_x_histories])
+        all_y = np.concatenate([h[:, 1] for h in all_x_histories])
+        x_min, x_max = all_x.min(), all_x.max()
+        y_min, y_max = all_y.min(), all_y.max()
+        x_range = max(x_max - x_min, 0.1)
+        y_range = max(y_max - y_min, 0.1)
+        xlim = [x_min - 0.6 * x_range, x_max + 0.6 * x_range]
+        ylim = [y_min - 0.6 * y_range, y_max + 0.6 * y_range]
         x1 = np.linspace(xlim[0], xlim[1], 100)
         x2 = np.linspace(ylim[0], ylim[1], 100)
         X1, X2 = np.meshgrid(x1, x2)
@@ -185,14 +238,21 @@ def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_opti
         levels = np.logspace(np.log10(max(Z.min(), 1e-10)), np.log10(Z.max()), 30)
         contour = ax2.contour(X1, X2, Z, levels=levels, alpha=0.6, cmap='viridis')
         ax2.clabel(contour, inline=True, fontsize=8, fmt='%.2e')
-        ax2.plot(x_history[:, 0], x_history[:, 1], 'b-', linewidth=1.5, alpha=0.6, zorder=2)
-        for i in range(len(x_history)):
-            if i == 0:
-                ax2.plot(x_history[i, 0], x_history[i, 1], 'gs', markersize=14, label='Initial', zorder=5, markeredgecolor='darkgreen', markeredgewidth=2)
-            elif i == len(x_history) - 1:
-                ax2.plot(x_history[i, 0], x_history[i, 1], 'r*', markersize=18, label='Final', zorder=6, markeredgecolor='darkred', markeredgewidth=1)
+        colors = plt.cm.tab10(np.linspace(0, 1, num_trials))
+        for trial_idx, (x_hist_trial, f_hist_trial) in enumerate(zip(all_x_histories, all_f_histories)):
+            is_nominal = (trial_idx == 0)
+            color = colors[trial_idx]
+            alpha_val = 0.8 if is_nominal else 0.4
+            linewidth = 2.0 if is_nominal else 1.0
+            ax2.plot(x_hist_trial[:, 0], x_hist_trial[:, 1], '-', color=color, linewidth=linewidth, alpha=alpha_val, zorder=2)
+            if is_nominal:
+                ax2.plot(x_hist_trial[0, 0], x_hist_trial[0, 1], 'gs', markersize=14, label='Initial (nominal)', zorder=5, markeredgecolor='darkgreen', markeredgewidth=2)
             else:
-                ax2.plot(x_history[i, 0], x_history[i, 1], 'o', color='steelblue', markersize=5, alpha=0.7, zorder=3)
+                ax2.plot(x_hist_trial[0, 0], x_hist_trial[0, 1], 'o', color=color, markersize=6, alpha=0.6, zorder=4)
+            if is_nominal:
+                ax2.plot(x_hist_trial[-1, 0], x_hist_trial[-1, 1], 'r*', markersize=18, label='Final (nominal)', zorder=6, markeredgecolor='darkred', markeredgewidth=1)
+            else:
+                ax2.plot(x_hist_trial[-1, 0], x_hist_trial[-1, 1], '*', color=color, markersize=10, alpha=0.7, zorder=5)
         label_step = max(1, len(x_history) // 15)
         for i in range(0, len(x_history), label_step):
             ax2.annotate(f'{i}', (x_history[i, 0], x_history[i, 1]), fontsize=9, xytext=(6, 6), textcoords='offset points', bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.6), fontweight='bold')
@@ -209,12 +269,10 @@ def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_opti
         ax2.set_xlabel('x₁', fontsize=12)
         ax2.set_ylabel('x₂', fontsize=12)
         ax2.set_title(f'{title}: Trajectory', fontsize=13, fontweight='bold')
-        ax2.legend(loc='best')
+        ax2.legend(loc='best', fontsize=9)
         ax2.grid(True, alpha=0.3)
-        if np.isfinite(xlim[0]) and np.isfinite(xlim[1]) and xlim[0] < xlim[1]:
-            ax2.set_xlim(xlim)
-        if np.isfinite(ylim[0]) and np.isfinite(ylim[1]) and ylim[0] < ylim[1]:
-            ax2.set_ylim(ylim)
+        ax2.set_xlim(xlim)
+        ax2.set_ylim(ylim)
     plt.tight_layout()
     return fig, x_history, f_history
 def process_problem_from_registry(problem, max_iter=50, save_plot=True):
@@ -228,30 +286,26 @@ def process_problem_from_registry(problem, max_iter=50, save_plot=True):
     f_jax, c_jax = problem["funcs_jax"]
     ineq_indices = problem.get("ineq_indices_jax", [])
     n_constr = problem["n_constr"]
+    bounds = problem.get("bounds", None)
     print(f"\n{'='*70}")
+    print(f"Problem: {name}")
+    print(f"Variables: {n_vars}, Constraints: {n_constr}")
+    print(f"Initial point: {x0}")
+    print(f"Reference objective: {f_optimal}")
+    print(f"Bounds: {bounds}")
     print(f"{'='*70}")
+    if bounds is not None:
+        has_finite_bounds = any(b[0] > -1e19 or b[1] < 1e19 for b in bounds)
+        if has_finite_bounds:
+            c_with_bounds, ineq_with_bounds = create_bounds_constraints(bounds, c_jax if n_constr > 0 else None, ineq_indices if n_constr > 0 else None)
+            print(f"Added bound constraints, total constraints now: {len(ineq_with_bounds)}")
+            c_jax = c_with_bounds
+            ineq_indices = ineq_with_bounds
     try:
-        if n_constr == 0:
-            _, _, x_hist_quick, _ = solve_unconstrained_with_history(jnp.array(x0), f_jax, max_iter, 1e-6)
+        if n_constr == 0 and (bounds is None or not has_finite_bounds):
+            fig, x_hist, f_hist = visualize_optimization(x0, f_jax, c=None, ineq_indices=None, max_iter=max_iter, f_optimal=f_optimal, title=name.upper(), spread_radius=5.0, num_trials=10)
         else:
-            _, _, x_hist_quick, _ = solve_sqp_with_history(x0, f_jax, c_jax, ineq_indices, max_iter=max_iter)
-        x_hist_quick = np.array(x_hist_quick)
-        x_min, x_max = x_hist_quick[:, 0].min(), x_hist_quick[:, 0].max()
-        y_min, y_max = x_hist_quick[:, 1].min(), x_hist_quick[:, 1].max()
-        x_range = max(x_max - x_min, 0.1)
-        y_range = max(y_max - y_min, 0.1)
-        xlim = [x_min - 0.5 * x_range, x_max + 0.5 * x_range]
-        ylim = [y_min - 0.5 * y_range, y_max + 0.5 * y_range]
-    except:
-        x0_range = np.abs(x0)
-        margin = np.maximum(x0_range * 0.5, 1.0)
-        xlim = [x0[0] - margin[0], x0[0] + margin[0]]
-        ylim = [x0[1] - margin[1], x0[1] + margin[1]]
-    try:
-        if n_constr == 0:
-            fig, x_hist, f_hist = visualize_optimization(x0, f_jax, c=None, ineq_indices=None, max_iter=max_iter, f_optimal=f_optimal, xlim=xlim, ylim=ylim, title=name.upper())
-        else:
-            fig, x_hist, f_hist = visualize_optimization(x0, f_jax, c=c_jax, ineq_indices=ineq_indices, max_iter=max_iter, f_optimal=f_optimal, xlim=xlim, ylim=ylim, title=name.upper())
+            fig, x_hist, f_hist = visualize_optimization(x0, f_jax, c=c_jax, ineq_indices=ineq_indices, max_iter=max_iter, f_optimal=f_optimal, title=name.upper(), spread_radius=5.0, num_trials=10)
         print(f"Final point: {x_hist[-1]}")
         print(f"Final objective: {f_hist[-1]:.6e}")
         print(f"Reference objective: {f_optimal:.6e}")

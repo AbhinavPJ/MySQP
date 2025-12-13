@@ -3,6 +3,7 @@ import pandas as pd #type:ignore
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
+import sys
 from sqp.benchmarks.runner import (
     PROBLEM_REGISTRY,
     evaluate_torch, evaluate_jax_batch, evaluate_scipy,
@@ -244,7 +245,6 @@ def run_all_experiments_automated():
         logger.close()
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) == 1:
         run_all_experiments_automated()
     else:
