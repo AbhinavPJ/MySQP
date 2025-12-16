@@ -1,202 +1,127 @@
-# SQP Solvers
 
-Sequential Quadratic Programming solver implementations in JAX, PyTorch, and SciPy.
+# SQP: Sequential Quadratic Programming Suite
+
+Comprehensive SQP solvers in JAX and PyTorch, with benchmarking, problem generation, and experiment utilities for the Hock–Schittkowski (HS) test suite. Every Python file is designed for direct use or extension.
 
 ## Installation
 
 ```bash
-pip install -e .
+pip install -e .         
 ```
 
 ## Project Structure
 
 ```
 sqp/
-├── sqp/                  # Main package
-│   ├── solvers/         # SQP implementations
-│   ├── benchmarks/      # Hock-Schittkowski testing suite
-├── experiments/         # Algorithm demonstrations
-├── data/               # Problem datasets (113 HS problems) 
-├── results/            # Benchmark results
-└── scripts/            # Utility scripts
+    solvers/
+        jax_sqp.py         # Core JAX SQP solver (differentiable, low-level API)
+        jax_wrapper.py     # JaxSQPSolver: modopt-compatible, high-level JAX interface
+        torch_sqp.py       # PyTorch SQP (cvxpylayers backend, low-level API)
+        torch_wrapper.py   # TorchSQPSolver: modopt-compatible, high-level Torch interface
+        __init__.py        # Exposes all main solver APIs
+    benchmarks/
+        problems.py        # 100+ HS problems (JAX & Torch), PROBLEM_REGISTRY
+        runner.py          # run_suite, evaluation helpers, batch runners
+        utils.py           # Constraint/bounds helpers for benchmarking
+        modopt_benchmarking.py # Modopt integration for benchmarking
+        __init__.py        # Imports registry and runners
+    __init__.py          # Package root
+scripts/
+    generate_code.py     # Generate JAX/Torch code from .apm HS problems
+    scrape_problems.py   # Download HS .apm files from APMonitor
+experiments/
+    algorithms/          # Textbook SQP implementations (JAX/NumPy)
+    differentiability/   # Gradient checks, batch diff demos
+    robustness/          # Tolerance/perturbation sweeps, visualization
+benchmark-results/  # Benchmark outputs, plots
 ```
 
-## Solvers
+## Usage
 
-### JAX SQP Solver
+### JAX: Modopt interface
+```python
+from modopt import JaxProblem
+from sqp.solvers import JaxSQPSolver
+
+prob = JaxProblem(
+    name="example",
+    x0=...,  # initial guess
+    jax_obj=...,  # objective (JAX)
+    jax_con=...,  # constraints (JAX)
+    cl=..., cu=...  # bounds
+)
+opt = JaxSQPSolver(prob, maxiter=100)
+results = opt.solve()
+opt.print_results()
+```
+*`jax_wrapper.py` provides `JaxSQPSolver`, a modopt-compatible optimizer. All solver options are exposed as kwargs.*
+
+
+### JAX: Differentiable solve (custom VJP)
+```python
+from sqp.solvers import JaxSQPSolver
+x_star = JaxSQPSolver.solve_sqp_diff(x0, params, f_fn, c_fn, ineq_indices=[])
+```
+*`jax_sqp.py` exposes `solve_sqp_diff` for differentiable optimization with custom VJP. Supports batching and gradient computation without unrolling.*
+
+
+### JAX: Low-level API
 ```python
 from sqp.solvers import solve_sqp_fixed_iter
-import jax.numpy as jnp
-
-x, lam, converged = solve_sqp_fixed_iter(
-    x0=jnp.array([0.0, 0.0]),
-    f=lambda x: x[0]**2 + x[1]**2,
-    c=lambda x: jnp.array([x[0] + x[1] - 1]),
-    ineq_indices=jnp.array([0]),
-    max_iter=100
-)
+x, lam, U, converged, iters = solve_sqp_fixed_iter(x0, f, c, ineq_indices, max_iter=100, tol=1e-6)
 ```
+*Direct access to the core JAX SQP solver (`jax_sqp.py`). Returns all solver internals. Set `return_history=True` for traces.*
 
-Features:
-- JIT-compiled with JAX for performance
-- Supports equality and inequality constraints
-- BFGS Hessian approximation with quasi-Newton updates
-- Custom KKT solver for active set management
-- Merit function with penalty parameter for line search
-- Automatic differentiation for gradients and Jacobians
-- Differentiable without unrolling(Implemented the ideas presented in "OptNet: Differentiable Optimization as a Layer in Neural Networks" by Amos and Kolter,2017)
 
-### PyTorch SQP Solver
+### PyTorch: Low-level API
 ```python
 from sqp.solvers import solve_sqp_original
-import torch
-
-x, lam, _, _ = solve_sqp_original(
-    x0=torch.tensor([0.0, 0.0]),
-    f=lambda x: x[0]**2 + x[1]**2,
-    c=[lambda x: x[0] + x[1] - 1],
-    ineq_indices=[0],
-    max_iter=100
-)
+x, lam, iters, converged = solve_sqp_original(x0, f, c, ineq_indices, max_iter=100)
 ```
+*`torch_sqp.py` provides the original PyTorch SQP (cvxpylayers backend). Constraints must be 1D tensors.*
 
-Features:
-- Solves QP subproblems with CVXPY
-
-### SciPy Wrapper
+### PyTorch: Modopt interface
 ```python
-from sqp.solvers import solve_sqp_scipy
-
-result = solve_sqp_scipy(
-    x0=np.array([0.0, 0.0]),
-    f=lambda x: x[0]**2 + x[1]**2,
-    g=lambda x: np.array([2*x[0], 2*x[1]]),
-    c=lambda x: np.array([x[0] + x[1] - 1]),
-    j=lambda x: np.array([[1.0, 1.0]]),
-    lb=np.array([-10, -10]),
-    ub=np.array([10, 10]),
-    cl=np.array([0.0]),
-    cu=np.array([0.0])
-)
+from sqp.solvers import TorchSQPSolver
+opt = TorchSQPSolver(prob, maxiter=100)
+results = opt.solve()
 ```
+*`torch_wrapper.py` provides `TorchSQPSolver`, a modopt-compatible optimizer for PyTorch.*
 
-Features:
-- SLSQP method from SciPy
-- Baseline for comparison
-- Mature, well-tested implementation
 
-## Benchmarks
+## Benchmarks & Problem Suite
 
-### Hock-Schittkowski Test Suite
-
-The benchmark suite includes 113 problems from the Hock-Schittkowski collection:
-
+### Problem Registry
 ```python
-from sqp.benchmarks import PROBLEM_REGISTRY, run_suite
-
-# Access individual problem
-problem = PROBLEM_REGISTRY[0]
-print(f"Problem: {problem['name']}")
-print(f"Variables: {problem['n_vars']}")
-print(f"Constraints: {problem['n_constr']}")
-print(f"Reference objective: {problem['ref_obj']}")
-
-# Run full benchmark suite
-run_suite()
+from sqp.benchmarks import PROBLEM_REGISTRY
+problem = PROBLEM_REGISTRY[0]  # dict: name, n_vars, bounds, x0, funcs_jax, funcs_torch, ...
 ```
-
-Problem structure:
-- `name`: Problem identifier (e.g., "hs001")
-- `n_vars`: Number of decision variables
-- `n_constr`: Number of constraints
-- `ref_obj`: Reference objective value
-- `funcs_jax`: JAX objective and constraint functions
-- `funcs_torch`: PyTorch objective and constraint functions
-- `ineq_indices`: Indices of inequality constraints
-- `x0`: Initial guess
-- `bounds`: Variable bounds
+*`problems.py` contains 100+ HS problems for JAX and Torch, with all metadata. Use directly or for custom experiments.*
 
 ### Running Benchmarks
-
 ```python
-from sqp.benchmarks.runner import evaluate_jax_batch, evaluate_torch, evaluate_scipy
-
-# Evaluate single problem with different solvers
-problem = PROBLEM_REGISTRY[0]
-
-# JAX (batch mode)
-results, time = evaluate_jax_batch(problem, [problem['x0']])
-
-# PyTorch
-time, obj, feas = evaluate_torch(problem, problem['x0'])
-
-# SciPy
-time, obj, feas = evaluate_scipy(problem, problem['x0'])
+from sqp.benchmarks.runner import run_suite, evaluate_jax_batch, evaluate_torch
+run_suite()  # Full suite, writes CSVs to runs/<timestamp>/
+results, elapsed = evaluate_jax_batch(problem, [problem['x0']])
+t_torch, obj_torch, feas_torch = evaluate_torch(problem, problem['x0'])
 ```
+*`runner.py` provides batch and single-problem evaluation for JAX, Torch, and SciPy. `utils.py` adds bounds/constraint helpers. `modopt_benchmarking.py` integrates with modopt.*
 
-## Experiments
 
-### Algorithm Demonstrations
+## Experiments & Utilities
 
-#### Algorithm 18.1 - Equality-Constrained SQP (JAX)
-```bash
-python experiments/algorithms/algorithm_18_1_jax.py
-```
+### Experiments
+- `experiments/algorithms/algorithm_18_1_jax.py`, `algorithm_18_1_naive.py`: textbook SQP in JAX/NumPy
+- `experiments/differentiability/batch_diff_demo.py`, `test_diff_simple.py`: gradient checks, batch diff
+- `experiments/robustness/run.py`: tolerance/perturbation sweeps
+- `experiments/robustness/visualize_optimization.py`: 2D optimization trajectory plots
 
-JAX implementation of the equality-constrained SQP method with JIT compilation and automatic differentiation.
+### Scripts
+- `scripts/generate_code.py`: Converts .apm HS problems to JAX/Torch code and metadata
+- `scripts/scrape_problems.py`: Downloads HS .apm files from APMonitor
 
-#### Algorithm 18.1 - Equality-Constrained SQP (NumPy)
-```bash
-python experiments/algorithms/algorithm_18_1_naive.py
-```
+### Outputs
+- `runs/`, `logs/`, `benchmark-results/`: All experiment and benchmark outputs, logs, and plots
 
-Pure NumPy implementation using numerical finite differences for derivatives.
-
-### Differentiability Experiments
-
-#### Test Suite
-```bash
-python experiments/differentiability/test_diff_simple.py
-```
-Validates implicit differentiation through SQP solver using custom VJP against finite differences for scalar/vector parameters and various constraint types.
-
-#### Batch Differentiation Demo
-```bash
-python experiments/differentiability/batch_diff_demo.py
-```
-Demonstrates batched solving of 1000+ problems in parallel with JAX and efficient gradient computation without unrolling.
-
-### Robustness Experiments
-
-#### Comprehensive Robustness Analysis
-```bash
-python experiments/robustness/run.py
-```
-
-Runs several automated experiments to test solver robustness:
-
-1. **Perturbation Tests**: Random initialization sweeps with varying spread radii around nominal starting points
-2. **Tolerance Sweeps**: Success rate analysis across different objective tolerance levels (0.1x to 10x base tolerance)
-3. **JAX Scaling Trials**: Grid search over spread radius (1e-3 to 100) and number of trials (5 to 1000)
-4. **Solver Comparison**: Head-to-head evaluation of JAX, PyTorch, and SciPy solvers
-
-Features:
-- Automated execution of full test suite
-- Per-problem and per-trial success metrics
-- Performance profiling and timing analysis
-- Visualization with matplotlib plots
-- Results saved to timestamped directories in `runs/`
-
-Run specific experiments:
-```bash
-python experiments/robustness/run.py baseline     # Standard benchmark suite
-python experiments/robustness/run.py tolerance    # Tolerance sweep only
-python experiments/robustness/run.py jax_grid     # JAX scaling analysis
-python experiments/robustness/run.py all          # All experiments
-```
-
-#### Optimization Trajectory Visualization
-```bash
-python experiments/robustness/visualize_optimization.py
-```
-Generates convergence plots and contour trajectory visualizations for all 2D benchmark problems showing optimization paths, constraint boundaries, and iteration-by-iteration progress.
+---
+Every Python file in this project is designed for direct use, extension, or experimentation. For details, see docstrings in each file or browse the source.

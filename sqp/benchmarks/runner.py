@@ -10,8 +10,9 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 from scipy.optimize import minimize, Bounds, NonlinearConstraint
-from sqp.solvers.original import solve_sqp as TorchSQP
-from sqp.solvers.jax_sqp import solve_sqp as JAX_SQP
+from modopt import JaxProblem #type:ignore
+from sqp.solvers.torch_wrapper import TorchSQPSolver
+from sqp.solvers.jax_wrapper import JaxSQPSolver
 from sqp.benchmarks.utils import add_bounds_to_constraints_jax, add_bounds_to_constraints_torch
 from sqp.benchmarks.problems import PROBLEM_REGISTRY
 warnings.filterwarnings("ignore") # I don't want to see any warnings during benchmarking
@@ -45,37 +46,75 @@ def evaluate_torch(prob,x0np): # evaluate a single problem using the PyTorch sol
     f=prob['funcs_torch'][0] # objective function in PyTorch
     x0=torch.tensor(x0np,dtype=torch.double) #starting point in PyTorch
     t0=time.perf_counter() #start timer
-    xf,_,_,_=TorchSQP(x0=x0,f=f,c=c,ineq_indices=ineq,max_iter=MAX_ITER,tol=1e-6) #actual solve
+    xf,_,_,_=TorchSQPSolver.solve_sqp(x0=x0,f=f,c=c,ineq_indices=ineq,max_iter=MAX_ITER,tol=1e-6) #actual solve
     t=time.perf_counter()-t0 #end timer
     xnp=xf.detach().numpy() #final point as numpy array
     fv=float(f(torch.tensor(xnp,dtype=torch.double))) #final objective value
     feas=viol(c(torch.tensor(xnp,dtype=torch.double)).detach().numpy(),ineq) #final feasibility
     return t,fv,feas    #time, final objective, final feasibility
-def evaluate_jax_batch(prob,x0_batch_np): # evaluate a batch of problems using the JAX solver
-    c,ineq=add_bounds_to_constraints_jax(prob) #total constraints and inequality indices
-    f=prob['funcs_jax'][0] # objective function in JAX
-    ineq_idx=jnp.array([] if ineq is None else ineq,dtype=jnp.int32) #inequality indices as JAX array
-    solver=JAX_SQP #solver function
-    def solve_single(x): #solve one problem
-        result=solver(x,f,c,ineq_idx,max_iter=MAX_ITER,tol=1e-6) #actual solve
-        xf=result[0] #final point
-        return xf#return final point
-    solve_batch=jit(vmap(solve_single)) #batch solver
-    x0_batch=jnp.array(x0_batch_np) #starting points batch
-    if x0_batch.shape[0]>0: #warm up
-        _=solve_batch(x0_batch[:min(2,x0_batch.shape[0])]) #dummy run
-        jax.block_until_ready(_) #wait for completion
-    t0=time.perf_counter() #start timer
-    xf_batch=solve_batch(x0_batch) #resulting points batch
-    jax.block_until_ready(xf_batch) #wait for completion
-    ttot=time.perf_counter()-t0 #end timer
-    out=[] #output list
-    for i in range(len(x0_batch_np)):
-        x=np.array(xf_batch[i]) #final point as numpy array
-        fv=float(f(jnp.array(x))) #final objective value
-        feas=viol(np.array(c(jnp.array(x))),ineq) #final feasibility
-        out.append((fv,feas)) #list of (final objective,feasibility)
-    return out,ttot  #return list and total time
+def evaluate_jax_batch(prob,x0_batch_np):
+    f_jax = prob['funcs_jax'][0]
+    c_base, ineq = add_bounds_to_constraints_jax(prob)
+    x0_sample = jnp.array(prob['x0'])
+    c_val = c_base(x0_sample)
+    has_constraints = jnp.atleast_1d(c_val).size > 0
+    if has_constraints:
+        n_constraints = jnp.atleast_1d(c_base(x0_sample)).size
+        cl_arr = np.zeros(n_constraints)
+        cu_arr = np.zeros(n_constraints)
+        if ineq is not None:
+            for i in ineq:
+                cl_arr[i] = -np.inf
+                cu_arr[i] = 0.0
+        problem = JaxProblem(
+            name=prob['name'],
+            x0=prob['x0'],
+            jax_obj=f_jax,
+            jax_con=c_base,
+            cl=cl_arr,
+            cu=cu_arr
+        )
+    else:
+        problem = JaxProblem(
+            name=prob['name'],
+            x0=prob['x0'],
+            jax_obj=f_jax
+        )
+    optimizer = JaxSQPSolver(
+        problem,
+        maxiter=MAX_ITER,
+        opt_tol=1e-6,
+        jax_obj=f_jax,
+        jax_con=c_base if has_constraints else None,
+        turn_off_outputs=True,  # prevent modopt from writing problem_outputs/* directories
+    )
+    t0 = time.perf_counter()
+    x0_batch = jnp.array(x0_batch_np, dtype=jnp.float64)
+
+    def solve_one(x0_single):
+        return optimizer._solver(
+            x0_single,
+            ineq_indices=optimizer.ineq_idx,
+            max_iter=MAX_ITER,
+            tol=1e-6,
+        )
+
+    batched_solver = jax.jit(jax.vmap(solve_one))
+    result = batched_solver(x0_batch)
+    # result is a tuple of arrays; length can be 4 or 5 depending on solver signature
+    if len(result) == 5:
+        x_final_batch, lam_final_batch, U_final_batch, converged_batch, _ = result
+    else:
+        x_final_batch, lam_final_batch, U_final_batch, converged_batch = result
+    x_final_batch.block_until_ready()
+    xf_batch = [np.array(x_final_batch[i]) for i in range(x_final_batch.shape[0])]
+    ttot = time.perf_counter() - t0
+    out = []
+    for i, x in enumerate(xf_batch):
+        fv = float(f_jax(jnp.array(x)))
+        feas = viol(np.array(c_base(jnp.array(x))), ineq)
+        out.append((fv, feas))
+    return out, ttot
 def evaluate_scipy(prob,x0np): # evaluate a single problem using the SciPy SLSQP solver
     f_jax=prob['funcs_jax'][0]  # objective function in JAX
     c_jax,ineq=add_bounds_to_constraints_jax(prob) # total constraints and inequality indices

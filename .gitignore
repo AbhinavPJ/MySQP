@@ -28,9 +28,10 @@ run.py
 venv/
 ENV/
 env/
-docs/BOOK/
-docs/CVXPY/
-docs/JAX/
+docs/
+recap.md
+run.txt
+pseudocode.txt
 # IDEs
 .vscode/
 .idea/

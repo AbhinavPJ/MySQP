@@ -4,14 +4,15 @@ import numpy as np
 import jax  #type: ignore
 import jax.numpy as jnp  #type: ignore
 from jax import jit, vmap, grad  #type: ignore
-from sqp.solvers.jax_sqp import solve_sqp_diff 
+from sqp.solvers.jax_wrapper import JaxSQPSolver
+jax.config.update("jax_enable_x64", True)
 def objective_jax(x, theta): #sample objective function 
     return x[0]+x[1]
 def constraints_jax(x,theta): #sample constraint function
     return jnp.array([ x[0]**2 + x[1]**2 - theta ])
 def single_problem_solver_jax(x0,theta):#solve one problem instance
     ineq_indices = (0,) #non diff argument,so ensure jax doesnt trace it
-    x_final = solve_sqp_diff(x0, theta, objective_jax, constraints_jax, ineq_indices, max_iter=50, tol=1e-6)
+    x_final = JaxSQPSolver.solve_sqp_diff(x0, theta, objective_jax, constraints_jax, ineq_indices, max_iter=50, tol=1e-6)
     return x_final, None 
 batch_solver_jax = vmap(single_problem_solver_jax, in_axes=(0, None)) #parallelize over x0, broadcast theta
 jit_batch_solver_jax = jit(batch_solver_jax) #JIT-compile

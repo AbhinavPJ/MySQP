@@ -1,13 +1,14 @@
-import jax #type:ignore
-import jax.numpy as jnp #type:ignore
-from jax import grad, jacfwd, lax #type:ignore
+import jax  # type: ignore
+import jax.numpy as jnp  # type: ignore
+from jax import grad, jacfwd, lax  # type: ignore
 from functools import partial
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # type: ignore
 import numpy as np
 import os
 import sys
+jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
-from experiments.robustness.loss import solve_sqp_fixed_iter, viol, merit, kkt, bfgs_update, EPSILON
+from sqp.solvers.jax_wrapper import JaxSQPSolver
 from sqp.benchmarks import PROBLEM_REGISTRY
 jax.config.update("jax_enable_x64", True)
 OUTPUT_DIR = "experiments/robustness/optimization_plots"
@@ -49,131 +50,7 @@ def create_bounds_constraints(bounds, original_c=None, original_ineq_indices=Non
     for i in range(n_bound_constraints):
         combined_ineq_indices.append(base_idx + i)
     return combined_c, combined_ineq_indices
-def solve_sqp_with_history(x0, f, c, ineq_indices, max_iter=100, tol=1e-6, eta=0.25, tau=0.5, rho=0.5, mu0=10.0):
-    x = jnp.array(x0, dtype=jnp.float64)
-    n = x.size
-    grad_f = grad(f)
-    jac_c = jacfwd(c)
-    c_init = c(x)
-    c_init = jnp.atleast_1d(c_init)
-    m = c_init.size
-    x_history = [np.array(x)]
-    f_history = [float(f(x))]
-    if m == 0:
-        return solve_unconstrained_with_history(x, f, max_iter, tol)
-    ineq_indices_arr = jnp.array(ineq_indices, dtype=jnp.int32)
-    all_indices = jnp.arange(m)
-    mask_ineq = jnp.isin(all_indices, ineq_indices_arr).astype(jnp.float64)
-    mask_eq = 1.0 - mask_ineq
-    lam = jnp.zeros(m, dtype=jnp.float64)
-    U = jnp.eye(n, dtype=jnp.float64)
-    mu = jnp.array(mu0, dtype=jnp.float64)
-    first_bfgs = True
-    for iter_idx in range(max_iter):
-        f_k = f(x)
-        g_k = grad_f(x)
-        c_k = jnp.atleast_1d(c(x))
-        J_k = jac_c(x)
-        if J_k.ndim == 1:
-            J_k = J_k.reshape(1, -1)
-        grad_L_k = g_k + J_k.T @ lam
-        H_k = U.T @ U
-        P = H_k + 1e-8 * jnp.eye(n)
-        q = g_k
-        A = J_k
-        b = -c_k
-        violation_mask = (c_k > -1e-5).astype(jnp.float64)
-        active_mask = mask_eq + mask_ineq * violation_mask
-        active_mask = jnp.minimum(active_mask, 1.0)
-        for _ in range(3):
-            p_trial, nu_trial = kkt(P, q, A, b, active_mask)
-            val = c_k + A @ p_trial
-            keep = active_mask * (nu_trial > -1e-5)
-            become = (1.0 - active_mask) * (val > -1e-5)
-            new_mask_ineq = keep + become
-            final_mask = mask_eq + mask_ineq * new_mask_ineq
-            active_mask = jnp.minimum(final_mask, 1.0)
-        p_k, nu_qp = kkt(P, q, A, b, active_mask)
-        lam_qp = jnp.where(mask_ineq > 0.5, jnp.maximum(0.0, nu_qp), nu_qp)
-        def safe_norm(x):
-            return jnp.sqrt(jnp.sum(x**2) + 1e-20)
-        fallback_p = -g_k / (safe_norm(g_k) + 1e-12)
-        p_k = jnp.where(jnp.all(jnp.isfinite(p_k)), p_k, fallback_p)
-        norm_c_k = viol(c_k, mask_eq, mask_ineq)
-        q_k = jnp.dot(g_k, p_k) + 0.5 * jnp.dot(p_k, H_k @ p_k)
-        mu_candidate = jnp.abs(q_k) / ((1.0 - rho) * norm_c_k + 1e-12) + 1e-3
-        mu = jnp.maximum(mu, mu_candidate)
-        phi_k = merit(f_k, c_k, mu, mask_eq, mask_ineq)
-        D_phi_k = jnp.dot(g_k, p_k) - mu * norm_c_k
-        alpha = 1.0
-        for _ in range(20):
-            x_trial = x + alpha * p_k
-            f_trial = f(x_trial)
-            c_trial = jnp.atleast_1d(c(x_trial))
-            phi_trial = merit(f_trial, c_trial, mu, mask_eq, mask_ineq)
-            if phi_trial <= phi_k + eta * alpha * D_phi_k or alpha <= 1e-10:
-                break
-            alpha = alpha * tau
-        x_new = x + alpha * p_k
-        lam_new = lam + alpha * (lam_qp - lam)
-        x_history.append(np.array(x_new))
-        f_history.append(float(f(x_new)))
-        g_new = grad_f(x_new)
-        J_new = jac_c(x_new)
-        if J_new.ndim == 1:
-            J_new = J_new.reshape(1, -1)
-        grad_L_new = g_new + J_new.T @ lam_new
-        s_k = x_new - x
-        y_k = grad_L_new - grad_L_k
-        s_y = jnp.dot(s_k, y_k)
-        s_norm2 = jnp.dot(s_k, s_k)
-        y_norm2 = jnp.dot(y_k, y_k)
-        if first_bfgs and s_y >= 1e-2 * s_norm2:
-            raw_ratio = y_norm2 / (s_y + EPSILON)
-            raw_ratio = jnp.clip(raw_ratio, 1e-4, 1e4)
-            scale_factor = jnp.sqrt(raw_ratio)
-            U = U * scale_factor
-            first_bfgs = False
-        if s_y > 1e-8 and s_norm2 > 1e-8:
-            U = bfgs_update(U, s_k, y_k)
-        x = x_new
-        lam = lam_new
-        if jnp.linalg.norm(grad_L_new) < tol and norm_c_k < tol:
-            break
-    return x, lam, x_history, f_history
-def solve_unconstrained_with_history(x0, f, max_iter, tol):
-    n = x0.size
-    grad_f = grad(f)
-    x = x0
-    H = jnp.eye(n, dtype=jnp.float64)
-    x_history = [np.array(x)]
-    f_history = [float(f(x))]
-    for _ in range(max_iter):
-        g = grad_f(x)
-        p = -H @ g
-        alpha = 1.0
-        for _ in range(20):
-            x_trial = x + alpha * p
-            f_trial = f(x_trial)
-            if f_trial <= f(x) + 1e-4 * alpha * jnp.dot(g, p) or alpha <= 1e-10:
-                break
-            alpha = alpha * 0.5
-        x_new = x + alpha * p
-        x_history.append(np.array(x_new))
-        f_history.append(float(f(x_new)))
-        g_new = grad_f(x_new)
-        s = x_new - x
-        y = g_new - g
-        sy = jnp.dot(s, y)
-        if sy > 1e-10:
-            rho = 1.0 / sy
-            I = jnp.eye(n)
-            V = I - rho * jnp.outer(s, y)
-            H = V @ H @ V.T + rho * jnp.outer(s, s)
-        x = x_new
-        if jnp.linalg.norm(g_new) < tol:
-            break
-    return x, jnp.zeros(0), x_history, f_history
+
 def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_optimal=None, xlim=None, ylim=None, title="Optimization Path", spread_radius=5.0, num_trials=10):
     all_x_histories = []
     all_f_histories = []
@@ -185,11 +62,11 @@ def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_opti
             perturbation = np.random.randn(len(x0)) * spread_radius
             x0_trial = jnp.array(x0) + jnp.array(perturbation)
         if c is None:
-            x_final, _, x_history, f_history = solve_unconstrained_with_history(jnp.array(x0_trial), f, max_iter, 1e-6)
+            x_final, _, x_history, f_history = JaxSQPSolver.solve_with_history(jnp.array(x0_trial), f, lambda x: jnp.array([]), [], max_iter, 1e-6)
         else:
             if ineq_indices is None:
                 ineq_indices = []
-            x_final, _, x_history, f_history = solve_sqp_with_history(x0_trial, f, c, ineq_indices, max_iter=max_iter)
+            x_final, _, x_history, f_history = JaxSQPSolver.solve_with_history(x0_trial, f, c, ineq_indices, max_iter=max_iter)
         all_x_histories.append(np.array(x_history))
         all_f_histories.append(np.array(f_history))
     x_history = all_x_histories[0]

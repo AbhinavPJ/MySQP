@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd #type:ignore
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt #type:ignore
 from pathlib import Path
 from datetime import datetime
 import sys
@@ -148,16 +148,32 @@ def run_jax_spread_trials_grid(spread_radii: list[float], jax_trials_list: list[
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path("runs") / f"jax_spread_trials_{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\n{'='*80}")
+    print(f"JAX SPREAD-TRIALS GRID EXPERIMENT")
+    print(f"{'='*80}")
+    print(f"Run ID: {run_id}")
+    print(f"Output directory: {run_dir}")
+    print(f"Spread radii: {spread_radii}")
+    print(f"JAX trials: {jax_trials_list}")
+    print(f"Total configurations: {len(spread_radii) * len(jax_trials_list)}")
+    print(f"Problems to test: {len(PROBLEM_REGISTRY)}")
+    print(f"{'='*80}\n")
+    config_num = 0
+    total_configs = len(spread_radii) * len(jax_trials_list)
     for spread in spread_radii:
         for n_trials_jax in jax_trials_list:
+            config_num += 1
+            print(f"\n[CONFIG {config_num}/{total_configs}] spread={spread}, n_trials={n_trials_jax}")
+            print(f"{'-'*60}")
             problem_success_flags = []
             total_time_ms = 0.0
             total_successful_trials = 0
             total_trials = 0
-            for prob in PROBLEM_REGISTRY:
+            for idx, prob in enumerate(PROBLEM_REGISTRY, 1):
                 name = prob["name"]
                 ref = prob["ref_obj"]
                 n_vars = prob["n_vars"]
+                print(f"  [{idx}/{len(PROBLEM_REGISTRY)}] {name:20s} ", end="", flush=True)
                 jax_x0 = []
                 for _ in range(n_trials_jax):
                     x = np.array(prob["x0"]) + rng.uniform(-spread, +spread, size=n_vars)
@@ -173,12 +189,18 @@ def run_jax_spread_trials_grid(spread_radii: list[float], jax_trials_list: list[
                 total_successful_trials += succ_for_problem
                 total_trials += len(jax_res)
                 problem_success_flags.append(1 if succ_for_problem > 0 else 0)
+                print(f"✓ {succ_for_problem}/{n_trials_jax} success ({ttot*1000:.1f}ms)")
             problem_success_rate = 100.0 * np.mean(problem_success_flags)
             trial_success_rate = 100.0 * total_successful_trials / total_trials if total_trials > 0 else 0.0
+            print(f"\n  SUMMARY: Problem success: {problem_success_rate:.1f}%, Trial success: {trial_success_rate:.1f}%, Time: {total_time_ms:.0f}ms")
             rows.append(dict(spread_radius=spread, n_trials_jax=n_trials_jax, problem_success_rate=problem_success_rate, trial_success_rate=trial_success_rate, total_time_ms=total_time_ms))
     df = pd.DataFrame(rows)
     csv_path = run_dir / "jax_spread_trials_summary.csv"
     df.to_csv(csv_path, index=False)
+    print(f"\n{'='*80}")
+    print(f"Results saved to: {csv_path}")
+    print(f"Generating plots...")
+    print(f"{'='*80}\n")
     for spread in spread_radii:
         d = df[df["spread_radius"] == spread].sort_values("n_trials_jax")
         if d.empty:
@@ -196,8 +218,11 @@ def run_jax_spread_trials_grid(spread_radii: list[float], jax_trials_list: list[
         plt.tight_layout()
         plt.savefig(fig_path, dpi=200)
         plt.close()
+        print(f"  Saved plot: {fig_path.name}")
+    print(f"\n{'='*80}")
+    print(f"EXPERIMENT COMPLETE")
+    print(f"{'='*80}\n")
     return df
-
 class TeeLogger:
     def __init__(self, filepath):
         self.terminal = sys.stdout
