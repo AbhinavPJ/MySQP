@@ -51,7 +51,7 @@ def create_bounds_constraints(bounds, original_c=None, original_ineq_indices=Non
         combined_ineq_indices.append(base_idx + i)
     return combined_c, combined_ineq_indices
 
-def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_optimal=None, xlim=None, ylim=None, title="Optimization Path", spread_radius=5.0, num_trials=10):
+def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=200, f_optimal=None, xlim=None, ylim=None, title="Optimization Path", spread_radius=0.0, num_trials=1):
     all_x_histories = []
     all_f_histories = []
     np.random.seed(42)
@@ -62,7 +62,7 @@ def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_opti
             perturbation = np.random.randn(len(x0)) * spread_radius
             x0_trial = jnp.array(x0) + jnp.array(perturbation)
         if c is None:
-            x_final, _, x_history, f_history = JaxSQPSolver.solve_with_history(jnp.array(x0_trial), f, lambda x: jnp.array([]), [], max_iter, 1e-6)
+            x_final, _, x_history, f_history = JaxSQPSolver.solve_with_history(jnp.array(x0_trial), f, lambda x: jnp.array([]), [], max_iter, 1e-8)
         else:
             if ineq_indices is None:
                 ineq_indices = []
@@ -91,7 +91,7 @@ def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_opti
     ax1.set_title(f'{title}: Convergence', fontsize=13, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     ax1.axhline(y=1e-6, color='r', linestyle='--', alpha=0.5, linewidth=2, label='Tolerance')
-    successful_trials = sum(1 for f_hist in all_f_histories if abs(f_hist[-1] - f_optimal) < 1e-3)
+    successful_trials = sum(1 for f_hist in all_f_histories if abs(f_hist[-1] - f_optimal) < 1e-6 or abs(f_hist[-1] - f_optimal) / (abs(f_optimal) + 1e-8) < 1e-6)
     textstr = f'Reference f*: {f_optimal:.6e}\nObtained f: {f_history[-1]:.6e}\nIterations: {len(f_history)-1}\nTrials: {num_trials} ({successful_trials} successful)\nSpread radius: {spread_radius}'
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
     ax1.text(0.98, 0.98, textstr, transform=ax1.transAxes, fontsize=10, verticalalignment='top', horizontalalignment='right', bbox=props)
@@ -112,9 +112,24 @@ def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_opti
         for i in range(X1.shape[0]):
             for j in range(X1.shape[1]):
                 Z[i, j] = float(f(jnp.array([X1[i, j], X2[i, j]])))
-        levels = np.logspace(np.log10(max(Z.min(), 1e-10)), np.log10(Z.max()), 30)
-        contour = ax2.contour(X1, X2, Z, levels=levels, alpha=0.6, cmap='viridis')
-        ax2.clabel(contour, inline=True, fontsize=8, fmt='%.2e')
+        Z_rel = Z - f_optimal
+        Z_rel = np.maximum(Z_rel, 1e-12)
+        im = ax2.imshow(
+            Z_rel,
+            extent=[xlim[0], xlim[1], ylim[0], ylim[1]],
+            origin="lower",
+            cmap="viridis_r", 
+            norm=plt.matplotlib.colors.LogNorm(
+                vmin=Z_rel.min(),
+                vmax=Z_rel.max()
+            ),
+            alpha=0.85,
+            aspect="auto",
+            zorder=0
+        )
+        cbar = plt.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
+        cbar.set_label(r"Relative objective $f(x) - f^*$", fontsize=11)
+
         colors = plt.cm.tab10(np.linspace(0, 1, num_trials))
         for trial_idx, (x_hist_trial, f_hist_trial) in enumerate(zip(all_x_histories, all_f_histories)):
             is_nominal = (trial_idx == 0)
@@ -152,7 +167,7 @@ def visualize_optimization(x0, f, c=None, ineq_indices=None, max_iter=50, f_opti
         ax2.set_ylim(ylim)
     plt.tight_layout()
     return fig, x_history, f_history
-def process_problem_from_registry(problem, max_iter=50, save_plot=True):
+def process_problem_from_registry(problem, max_iter=200, save_plot=True):
     name = problem["name"]
     x0 = jnp.array(problem["x0"])
     f_optimal = problem["ref_obj"]
@@ -180,9 +195,9 @@ def process_problem_from_registry(problem, max_iter=50, save_plot=True):
             ineq_indices = ineq_with_bounds
     try:
         if n_constr == 0 and (bounds is None or not has_finite_bounds):
-            fig, x_hist, f_hist = visualize_optimization(x0, f_jax, c=None, ineq_indices=None, max_iter=max_iter, f_optimal=f_optimal, title=name.upper(), spread_radius=5.0, num_trials=10)
+            fig, x_hist, f_hist = visualize_optimization(x0, f_jax, c=None, ineq_indices=None, max_iter=max_iter, f_optimal=f_optimal, title=name.upper(), spread_radius=0.0, num_trials=1)
         else:
-            fig, x_hist, f_hist = visualize_optimization(x0, f_jax, c=c_jax, ineq_indices=ineq_indices, max_iter=max_iter, f_optimal=f_optimal, title=name.upper(), spread_radius=5.0, num_trials=10)
+            fig, x_hist, f_hist = visualize_optimization(x0, f_jax, c=c_jax, ineq_indices=ineq_indices, max_iter=max_iter, f_optimal=f_optimal, title=name.upper(), spread_radius=0.0, num_trials=1)
         print(f"Final point: {x_hist[-1]}")
         print(f"Final objective: {f_hist[-1]:.6e}")
         print(f"Reference objective: {f_optimal:.6e}")
@@ -199,9 +214,9 @@ def process_problem_from_registry(problem, max_iter=50, save_plot=True):
         import traceback
         traceback.print_exc()
         return None
-def process_all_2d_problems(max_iter=50):
+def process_all_2d_problems(max_iter=200):
     for problem in PROBLEM_REGISTRY:
         if problem["n_vars"] == 2:
             result = process_problem_from_registry(problem, max_iter=max_iter)
 if __name__ == "__main__":
-    process_all_2d_problems(max_iter=50)
+    process_all_2d_problems(max_iter=200)

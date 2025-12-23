@@ -12,24 +12,14 @@ from modopt import JaxProblem#type: ignore
 from .jax_sqp import (
     solve_sqp_fixed_iter as _solve_sqp_fixed_iter,
     solve_sqp_diff as _solve_sqp_diff,
-    unconstrained_bfgs as _unconstrained_bfgs,
-    kkt as _kkt,
-    viol as _viol,
-    merit as _merit,
-    bfgs_update as _bfgs_update,
     EPSILON as _EPSILON
 )
 from jax import grad, jacfwd#type: ignore
 jax.config.update("jax_enable_x64", True)
 class JaxSQPSolver(Optimizer):
     EPSILON = _EPSILON
-    kkt = staticmethod(_kkt)
-    viol = staticmethod(_viol)
-    merit = staticmethod(_merit)
-    bfgs_update = staticmethod(_bfgs_update)
     solve_sqp_fixed_iter = staticmethod(_solve_sqp_fixed_iter)
     solve_sqp_diff = staticmethod(_solve_sqp_diff)
-    unconstrained_bfgs = staticmethod(_unconstrained_bfgs)
     @staticmethod
     def solve_with_history(x0, f, c, ineq_indices, max_iter=100, tol=1e-6):
         result = _solve_sqp_fixed_iter(
@@ -42,8 +32,8 @@ class JaxSQPSolver(Optimizer):
             x_final, lam_final, U_final, converged = result[:4]
             x_history = jnp.array([x_final])
             f_history = jnp.array([f(x_final)])
-        x_history_np = [np.array(x) for x in x_history]
-        f_history_np = [float(f_val) for f_val in f_history]
+        x_history_np = np.stack([np.asarray(x) for x in x_history], axis=0)
+        f_history_np = np.asarray(f_history, dtype=float)
         return x_final, lam_final, x_history_np, f_history_np
     def initialize(self):
         self.solver_name = 'jax_sqp'

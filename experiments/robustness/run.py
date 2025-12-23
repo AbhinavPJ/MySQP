@@ -26,15 +26,16 @@ def _is_feasible_local(feas_val: float, abs_feas_tol: float = ABS_FEAS_TOL, rel_
     return feas_val <= thresh
 
 def collect_per_trial_results(spread_radius: float, n_trials_jax: int = N_TRIALS_JAX, n_trials_torch: int = N_TRIALS_TORCH, n_trials_scipy: int = N_TRIALS_SCIPY, problems = PROBLEM_REGISTRY, rng: np.random.Generator | None = None):
+    from sqp.benchmarks.runner import evaluate_opensqp, N_TRIALS_OPENSQP
     if rng is None:
         rng = np.random.default_rng()
-    results = {"PyTorch": {}, "JAX": {}, "SciPy": {}}
+    results = {"PyTorch": {}, "JAX": {}, "SciPy": {}, "OpenSQP": {}}
     for prob in problems:
         name = prob["name"]
         ref = prob["ref_obj"]
         n_vars = prob["n_vars"]
-        torch_x0, jax_x0, scipy_x0 = [], [], []
-        max_trials = max(n_trials_torch, n_trials_jax, n_trials_scipy)
+        torch_x0, jax_x0, scipy_x0, opensqp_x0 = [], [], [], []
+        max_trials = max(n_trials_torch, n_trials_jax, n_trials_scipy, N_TRIALS_OPENSQP)
         for i in range(max_trials):
             x = np.array(prob["x0"]) + rng.uniform(-spread_radius, +spread_radius, size=n_vars)
             if i < n_trials_torch:
@@ -43,6 +44,8 @@ def collect_per_trial_results(spread_radius: float, n_trials_jax: int = N_TRIALS
                 jax_x0.append(x)
             if i < n_trials_scipy:
                 scipy_x0.append(x)
+            if i < N_TRIALS_OPENSQP:
+                opensqp_x0.append(x)
         torch_objs, torch_feas = [], []
         total_torch_time_ms = 0.0
         for x in torch_x0:
@@ -69,6 +72,14 @@ def collect_per_trial_results(spread_radius: float, n_trials_jax: int = N_TRIALS
             scipy_feas.append(float(feas))
             total_scipy_time_ms += t * 1000.0
         results["SciPy"][name] = dict(objs=scipy_objs, feas=scipy_feas, total_time_ms=total_scipy_time_ms, n_trials=len(scipy_x0), ref_obj=ref)
+        opensqp_objs, opensqp_feas = [], []
+        total_opensqp_time_ms = 0.0
+        for x in opensqp_x0:
+            res, t = evaluate_opensqp(prob, x)
+            opensqp_objs.append(float(res["fun"]))
+            opensqp_feas.append(float(res["feas"]))
+            total_opensqp_time_ms += t * 1000.0
+        results["OpenSQP"][name] = dict(objs=opensqp_objs, feas=opensqp_feas, total_time_ms=total_opensqp_time_ms, n_trials=len(opensqp_x0), ref_obj=ref)
     return results
 
 def tolerance_sweep_from_results(results: dict, tol_scales: list[float], base_abs_obj_tol: float = ABS_OBJ_TOL, base_rel_obj_tol: float = REL_OBJ_TOL, abs_feas_tol: float = ABS_FEAS_TOL, rel_feas_tol: float = REL_FEAS_TOL):
@@ -76,7 +87,7 @@ def tolerance_sweep_from_results(results: dict, tol_scales: list[float], base_ab
     for scale in tol_scales:
         abs_obj_tol = base_abs_obj_tol * scale
         rel_obj_tol = base_rel_obj_tol * scale
-        for solver in ["PyTorch", "JAX", "SciPy"]:
+        for solver in ["PyTorch", "JAX", "SciPy", "OpenSQP"]:
             solver_res = results[solver]
             problem_success_flags = []
             total_successful_trials = 0
@@ -113,7 +124,7 @@ def run_tolerance_sweep_and_plot(spread_radius: float = 0.1, n_trials_jax: int =
     csv_path = run_dir / "tolerance_sweep_summary.csv"
     df.to_csv(csv_path, index=False)
     plt.figure()
-    for solver in ["PyTorch", "JAX", "SciPy"]:
+    for solver in ["PyTorch", "JAX", "SciPy", "OpenSQP"]:
         d = df[df["solver"] == solver].sort_values("abs_obj_tol")
         plt.plot(d["abs_obj_tol"], d["problem_success_rate"], marker="o", label=solver)
     plt.xscale("log")
@@ -127,7 +138,7 @@ def run_tolerance_sweep_and_plot(spread_radius: float = 0.1, n_trials_jax: int =
     plt.savefig(fig_path, dpi=200)
     plt.close()
     plt.figure()
-    for solver in ["PyTorch", "JAX", "SciPy"]:
+    for solver in ["PyTorch", "JAX", "SciPy", "OpenSQP"]:
         d = df[df["solver"] == solver].sort_values("abs_obj_tol")
         plt.plot(d["abs_obj_tol"], d["trial_success_rate"], marker="o", label=solver)
     plt.xscale("log")
