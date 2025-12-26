@@ -25,7 +25,7 @@ REL_OBJ_TOL=1e-2 #relative tolerance for determining success
 ABS_FEAS_TOL=1e-6#absolute tolerance for feasibility
 REL_FEAS_TOL=1e-3#relative tolerance for feasibility
 MAX_ITER=100#maximum number of iterations for the solvers
-SPREAD_RADIUS=0#radius for random perturbations around the nominal starting point
+SPREAD_RADIUS=100#radius for random perturbations around the nominal starting point
 N_TRIALS_JAX=5#number of trials for JAX solver, this can be large since JAX is fast with batching
 N_TRIALS_OPENSQP=5#number of trials for OpenSQP solver, this can be small since OpenSQP is sequential
 TIMEOUT_SECONDS=30#maximum time allowed for each solver run in seconds
@@ -59,12 +59,23 @@ def evaluate_torch(prob,x0np): # evaluate a single problem using the PyTorch sol
     return t,fv,feas    #time, final objective, final feasibility
 def evaluate_jax_batch(prob,x0_batch_np):
     f_jax = prob['funcs_jax'][0]
-    c_base, ineq = add_bounds_to_constraints_jax(prob)
+    c_jax = prob['funcs_jax'][1]
+    ineq = prob.get("ineq_indices_jax", [])
+    bounds = prob.get("bounds", None)
+    if bounds is not None:
+        _BOUND_INF = 1e9
+        has_finite_bounds = any(
+            b[0] > -_BOUND_INF or b[1] < _BOUND_INF for b in bounds
+        )
+        if has_finite_bounds:
+            c_jax, ineq = add_bounds_to_constraints_jax(prob)
+
+    x0_batch = jnp.array(x0_batch_np, dtype=jnp.float64)
     x0_sample = jnp.array(prob['x0'])
-    c_val = c_base(x0_sample)
+    c_val = c_jax(x0_sample)
     has_constraints = jnp.atleast_1d(c_val).size > 0
     if has_constraints:
-        n_constraints = jnp.atleast_1d(c_base(x0_sample)).size
+        n_constraints = jnp.atleast_1d(c_jax(x0_sample)).size
         cl_arr = np.zeros(n_constraints)
         cu_arr = np.zeros(n_constraints)
         if ineq is not None:
@@ -75,7 +86,7 @@ def evaluate_jax_batch(prob,x0_batch_np):
             name=prob['name'],
             x0=prob['x0'],
             jax_obj=f_jax,
-            jax_con=c_base,
+            jax_con=c_jax,
             cl=cl_arr,
             cu=cu_arr
         )
@@ -90,7 +101,7 @@ def evaluate_jax_batch(prob,x0_batch_np):
         maxiter=MAX_ITER,
         opt_tol=1e-8,
         jax_obj=f_jax,
-        jax_con=c_base if has_constraints else None,
+        jax_con=c_jax if has_constraints else None,
         turn_off_outputs=True,  # prevent modopt from writing problem_outputs/* directories
     )
     t0 = time.perf_counter()
@@ -117,7 +128,7 @@ def evaluate_jax_batch(prob,x0_batch_np):
     out = []
     for i, x in enumerate(xf_batch):
         fv = float(f_jax(jnp.array(x)))
-        feas = viol(np.array(c_base(jnp.array(x))), ineq)
+        feas = viol(np.array(c_jax(jnp.array(x))), ineq)
         out.append((fv, feas))
     return out, ttot
 def evaluate_scipy(prob,x0np): # evaluate a single problem using the SciPy SLSQP solver

@@ -2,9 +2,10 @@
 The purpose of this file is to make the core JAX SQP solver accessible as a ModOpt Optimizer. This wrapper ensures
 compatibility with ModOpt's problem definitions and solver interface.
 '''
+import jax #type: ignore
+jax.config.update("jax_enable_x64", True)
 import time
 import numpy as np
-import jax #type: ignore
 import jax.numpy as jnp#type: ignore
 from functools import partial
 from modopt import Optimizer#type: ignore
@@ -12,12 +13,9 @@ from modopt import JaxProblem#type: ignore
 from .jax_sqp import (
     solve_sqp_fixed_iter as _solve_sqp_fixed_iter,
     solve_sqp_diff as _solve_sqp_diff,
-    EPSILON as _EPSILON
 )
 from jax import grad, jacfwd#type: ignore
-jax.config.update("jax_enable_x64", True)
 class JaxSQPSolver(Optimizer):
-    EPSILON = _EPSILON
     solve_sqp_fixed_iter = staticmethod(_solve_sqp_fixed_iter)
     solve_sqp_diff = staticmethod(_solve_sqp_diff)
     @staticmethod
@@ -28,13 +26,13 @@ class JaxSQPSolver(Optimizer):
         if len(result) == 7:
             x_final, lam_final, U_final, converged, x_history, f_history, actual_iters = result
         else:
-            # Fallback for older version
             x_final, lam_final, U_final, converged = result[:4]
             x_history = jnp.array([x_final])
             f_history = jnp.array([f(x_final)])
         x_history_np = np.stack([np.asarray(x) for x in x_history], axis=0)
         f_history_np = np.asarray(f_history, dtype=float)
-        return x_final, lam_final, x_history_np, f_history_np
+        cviol_history_np = np.array([])
+        return x_final, lam_final, x_history_np, f_history_np, cviol_history_np
     def initialize(self):
         self.solver_name = 'jax_sqp'
         self.options.declare('maxiter', default=100, types=int, desc='Maximum number of SQP iterations')
@@ -84,7 +82,6 @@ class JaxSQPSolver(Optimizer):
         if xu is not None and not np.all(np.isposinf(np.atleast_1d(xu))):
             has_bounds = True
         if has_bounds:
-            from sqp.benchmarks.utils import add_bounds_to_constraints_jax
             n_vars = len(self.problem.x0)
             xl_arr = np.full(n_vars, -np.inf) if xl is None else np.atleast_1d(xl).astype(np.float64)
             xu_arr = np.full(n_vars, np.inf) if xu is None else np.atleast_1d(xu).astype(np.float64)
@@ -100,8 +97,6 @@ class JaxSQPSolver(Optimizer):
                 'funcs_jax': (self.jax_f, self.jax_c),
                 'ineq_indices_jax': list(self.ineq_idx),
             }
-            self.jax_c, ineq_indices_with_bounds = add_bounds_to_constraints_jax(prob_dict)
-            self.ineq_idx = jnp.array(ineq_indices_with_bounds, dtype=jnp.int32)
         self._solver = jax.jit(
             partial(
                 _solve_sqp_fixed_iter,
